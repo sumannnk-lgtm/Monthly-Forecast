@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/180/10433/10433048.png">
+
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js');
+    });
+  }
+</script>
+    <meta charset="UTF-8">
+    <title>Forecast Analytics - Single Total Row</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; color: #333; }
+        .container { max-width: 1600px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+        .controls { display: grid; grid-template-columns: 1.2fr 0.6fr 0.6fr 0.6fr 1fr 1.2fr; gap: 10px; background: #eef7ff; padding: 20px; border-radius: 10px; margin-bottom: 20px; align-items: end; }
+        .btn-group { display: flex; gap: 10px; }
+        .btn { padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; }
+        .btn-excel { background: #217346; } .btn-pdf { background: #d32f2f; }
+        .chart-container { background: #fff; padding: 20px; border: 1px solid #ddd; border-radius: 10px; margin-bottom: 25px; height: 350px; }
+        .table-wrapper { overflow-x: auto; max-height: 550px; border: 1px solid #ddd; border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; min-width: 2400px; }
+        th { background: #1a5276; color: white; padding: 12px; font-size: 11px; text-transform: uppercase; position: sticky; top: 0; z-index: 10; border: 1px solid #2c3e50; }
+        td { padding: 8px; border: 1px solid #eee; font-size: 12px; text-align: right; }
+        td:first-child { text-align: left; font-weight: bold; position: sticky; left: 0; background: white; z-index: 5; border-right: 2px solid #1a5276; }
+        .analytics-col { background: #fff9db; font-weight: bold; color: #856404; }
+        /* ONLY ONE TOTAL ROW - AT THE FOOTER */
+        .footer-total { background: #343a40 !important; color: white !important; font-weight: bold; position: sticky; bottom: 0; z-index: 10; }
+        .footer-total td { background: #343a40; color: white; border-top: 2px solid #000; }
+        input, select { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<div id="capture-area" class="container">
+    <h2>Monthly Forecast & Analytics</h2>
+
+    <div class="controls no-print">
+        <div class="control-item"><strong>Upload CSV</strong><input type="file" id="csvFile" accept=".csv"></div>
+        <div class="control-item"><strong>Start Month</strong><select id="startMonth" onchange="render()"></select></div>
+        <div class="control-item"><strong>End Month</strong><select id="endMonth" onchange="render()"></select></div>
+        <div class="control-item"><strong>Rate ($ to €)</strong><input type="number" id="exRate" value="0.92" step="0.01" onchange="render()"></div>
+        <div class="control-item"><input type="text" id="search" placeholder="Search product..." onkeyup="render()"></div>
+        <div class="btn-group">
+            <button class="btn btn-excel" onclick="exportExcel()">Export Excel</button>
+            <button class="btn btn-pdf" onclick="exportPDF()">Export PDF</button>
+        </div>
+    </div>
+
+    <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
+
+    <div class="table-wrapper">
+        <table id="mainTable">
+            <thead>
+                <tr>
+                    <th>Product Name</th><th>Price ($)</th>
+                    <th class="analytics-col">Period Qty</th><th class="analytics-col">Period Caps</th>
+                    <th>Jan</th><th>Feb</th><th>Mar</th><th>Apr</th><th>May</th><th>Jun</th><th>Jul</th><th>Aug</th><th>Sep</th><th>Oct</th><th>Nov</th><th>Dec</th>
+                    <th>Jan C</th><th>Feb C</th><th>Mar C</th><th>Apr C</th><th>May C</th><th>Jun C</th><th>Jul C</th><th>Aug C</th><th>Sep C</th><th>Oct C</th><th>Nov C</th><th>Dec C</th>
+                    <th>Total Units</th><th>Total Caps</th>
+                    <th style="background:#d4edda; color:#155724">Total Value ($)</th><th style="background:#cce5ff; color:#004085">Total Value (€)</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+            <tfoot id="tableFoot"></tfoot>
+        </table>
+    </div>
+</div>
+
+<script>
+    let rows = [];
+    let myChart;
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    const sMonth = document.getElementById('startMonth');
+    const eMonth = document.getElementById('endMonth');
+    months.forEach((m, i) => {
+        sMonth.innerHTML += `<option value="${i}">${m}</option>`;
+        eMonth.innerHTML += `<option value="${i}" ${i===11?'selected':''}>${m}</option>`;
+    });
+
+    document.getElementById('csvFile').addEventListener('change', function(e) {
+        const reader = new FileReader();
+        reader.onload = function(evt) {
+            const lines = evt.target.result.split(/\r?\n/).filter(l => l.trim() !== "");
+            rows = lines.slice(1).map(line => {
+                const c = line.split(',');
+                return {
+                    name: c[0].replace(/"/g, '').trim(), uP: 0, 
+                    mU: c.slice(1, 13).map(v => parseFloat(v) || 0),
+                    tU: parseFloat(c[13]) || 0, tC: parseFloat(c[14]) || 0,
+                    mC: c.slice(16, 28).map(v => parseFloat(v) || 0)
+                };
+            });
+            render();
+        };
+        reader.readAsText(e.target.files[0]);
+    });
+
+    function updatePrice(idx, val) { rows[idx].uP = parseFloat(val) || 0; render(); }
+
+    function render() {
+        const start = parseInt(sMonth.value);
+        const end = parseInt(eMonth.value);
+        const rate = parseFloat(document.getElementById('exRate').value) || 1;
+        const query = document.getElementById('search').value.toLowerCase();
+        const filtered = rows.filter(r => r.name.toLowerCase().includes(query));
+
+        let totals = { pQ: 0, pC: 0, tU: 0, tC: 0, usd: 0, mU: Array(12).fill(0), mC: Array(12).fill(0) };
+
+        document.getElementById('tableBody').innerHTML = filtered.map((r, i) => {
+            const pQty = r.mU.slice(start, end + 1).reduce((a, b) => a + b, 0);
+            const pCap = r.mC.slice(start, end + 1).reduce((a, b) => a + b, 0);
+            const vTotal = (r.tU * r.uP);
+
+            totals.pQ += pQty; totals.pC += pCap; totals.tU += r.tU; totals.tC += r.tC; totals.usd += vTotal;
+            r.mU.forEach((v, idx) => totals.mU[idx] += v);
+            r.mC.forEach((v, idx) => totals.mC[idx] += v);
+
+            return `<tr><td>${r.name}</td><td><input type="number" step="0.01" style="width:50px" onchange="updatePrice(${i}, this.value)" value="${r.uP}"></td>
+                <td class="analytics-col">${pQty.toLocaleString()}</td><td class="analytics-col">${pCap.toLocaleString()}</td>
+                ${r.mU.map(v => `<td>${v.toLocaleString()}</td>`).join('')}${r.mC.map(v => `<td>${v.toLocaleString()}</td>`).join('')}
+                <td>${r.tU.toLocaleString()}</td><td>${r.tC.toLocaleString()}</td>
+                <td style="background:#f4fff4">$${vTotal.toLocaleString()}</td><td style="background:#f0f7ff">€${(vTotal*rate).toLocaleString()}</td></tr>`;
+        }).join('');
+
+        // CONSOLIDATED SINGLE TOTAL ROW
+        document.getElementById('tableFoot').innerHTML = `
+            <tr class="footer-total">
+                <td colspan="2">GRAND TOTAL</td>
+                <td class="analytics-col">${totals.pQ.toLocaleString()}</td>
+                <td class="analytics-col">${totals.pC.toLocaleString()}</td>
+                ${totals.mU.map(v => `<td>${v.toLocaleString()}</td>`).join('')}
+                ${totals.mC.map(v => `<td>${v.toLocaleString()}</td>`).join('')}
+                <td>${totals.tU.toLocaleString()}</td>
+                <td>${totals.tC.toLocaleString()}</td>
+                <td>$${totals.usd.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                <td>€${(totals.usd * rate).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+            </tr>`;
+        
+        updateChart(totals.mU, totals.mC);
+    }
+
+    function updateChart(unitData, capData) {
+        if (myChart) myChart.destroy();
+        const ctx = document.getElementById('monthlyChart').getContext('2d');
+        myChart = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: months, datasets: [{ label: 'Total Units', data: unitData, backgroundColor: '#1a5276' }, { label: 'Total Capsules', data: capData, backgroundColor: '#d35400' }]},
+            options: { maintainAspectRatio: false, responsive: true }
+        });
+    }
+
+    function exportExcel() {
+        const wb = XLSX.utils.table_to_book(document.getElementById("mainTable"), {sheet: "Forecast"});
+        XLSX.writeFile(wb, "Forecast_Report.xlsx");
+    }
+
+    function exportPDF() {
+        const element = document.getElementById('capture-area');
+        const opt = { margin: 0.2, filename: 'Forecast_Analytics.pdf', image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 1 }, jsPDF: { unit: 'in', format: 'a3', orientation: 'landscape' } };
+        html2pdf().set(opt).from(element).save();
+    }
+</script>
+</body>
+</html>
